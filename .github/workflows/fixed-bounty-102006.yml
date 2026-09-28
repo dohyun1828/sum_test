@@ -1,0 +1,58 @@
+name: Fixed-price issue 102006 preparation
+on:
+  push:
+    branches: [codex-fixed-bounty-102006-20260929]
+    paths: ['.github/workflows/fixed-bounty-102006.yml', 'fixed-bounty-102006/**']
+permissions:
+  contents: read
+concurrency:
+  group: fixed-bounty-102006
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.repository == 'dohyun1828/sum_test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch exact public upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git init upstream
+          git -C upstream remote add origin https://github.com/Expensify/App.git
+          git -C upstream fetch --depth=1 origin 201a6e128b7f7a402920de36fc70244d23b206f2
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = 201a6e128b7f7a402920de36fc70244d23b206f2
+          git -C upstream ls-files > evidence/tracked-files.txt
+          printf 'upstream_commit=%s\n' "$(git -C upstream rev-parse HEAD)" > evidence/environment.txt
+          date -u '+checked_at=%Y-%m-%dT%H:%M:%SZ' >> evidence/environment.txt
+          python3 - <<'PY'
+          import pathlib, subprocess, tarfile
+          root = pathlib.Path('upstream')
+          prefixes = ('src/', 'tests/', '__mocks__/', 'scripts/', 'config/', 'contributingGuides/', '.github/', 'assets/images/', 'modules/')
+          banned = {'.ttf', '.otf', '.woff', '.woff2', '.ttc', '.eot'}
+          paths = subprocess.check_output(['git','-C',str(root),'ls-files','-z']).decode().split('\0')
+          with tarfile.open('evidence/source.tar.gz','w:gz') as out:
+              for name in paths:
+                  if not name: continue
+                  p = root / name
+                  if p.is_file() and not p.is_symlink() and p.suffix.lower() not in banned and (name.startswith(prefixes) or '/' not in name):
+                      out.add(p,arcname=name,recursive=False)
+          PY
+      - name: Capture attached reference images and current issue metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 60 'https://github.com/user-attachments/assets/a67ac164-d6a0-490a-8a55-aee02cebda17' -o evidence/design-desktop.png
+          curl --fail --location --max-time 60 'https://github.com/user-attachments/assets/b3cf4ad4-5eb5-4db5-8ac0-dfa81c2d04d9' -o evidence/design-mobile.png
+          curl --fail --location --max-time 60 -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/Expensify/App/issues/102006' -o evidence/issue.json
+          curl --fail --location --max-time 60 -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/Expensify/App/issues/102006/comments?per_page=100' -o evidence/comments.json
+      - name: Retain captured input
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fixed-bounty-102006-source
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
