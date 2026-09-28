@@ -5,7 +5,7 @@ on:
     branches: [codex-paid-preflight-20260928]
     paths:
       - '.github/workflows/isolated-cell-boundaries-validation.yml'
-      - 'paid-work/**'
+      - 'paid-work/READY'
 
 permissions:
   contents: read
@@ -23,7 +23,7 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: latest
+          bun-version: '1.4.2'
       - name: Read pinned public upstream source
         shell: bash
         run: |
@@ -37,15 +37,31 @@ jobs:
           git -C upstream archive --format=tar.gz --output="$GITHUB_WORKSPACE/evidence/upstream-source.tar.gz" HEAD
           printf 'upstream_commit=%s\nbun_version=%s\nnode_version=%s\n' "$(git -C upstream rev-parse HEAD)" "$(bun --version)" "$(node --version)" > evidence/environment.txt
           date -u '+checked_at=%Y-%m-%dT%H:%M:%SZ' >> evidence/environment.txt
-      - name: Install public dependencies without lifecycle scripts
+      - name: Install dependencies and explicitly trust only sharp
         shell: bash
         run: |
           set -euo pipefail
           cd upstream
           bun install --ignore-scripts 2>&1 | tee ../evidence/logs/install.log
+          bun pm trust sharp 2>&1 | tee ../evidence/logs/sharp-setup.log
+          git checkout -- package.json
           if test -f bun.lock; then cp bun.lock ../evidence/dependency-bun.lock; fi
           if test -f bun.lockb; then cp bun.lockb ../evidence/dependency-bun.lockb; fi
           tar --exclude='*.ttf' --exclude='*.otf' --exclude='*.woff' --exclude='*.woff2' --exclude='*.ttc' -czf ../evidence/solver-utils-package.tar.gz -C node_modules/@tscircuit solver-utils
+      - name: Produce exact baseline runtime bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          mkdir -p .validation
+          cat > .validation/entry.ts <<'EOF'
+          export { BuildOutlineSolver } from '../lib/solvers/BuildOutlineSolver/BuildOutlineSolver'
+          export { CellBoundariesPipeline } from '../lib/solvers/CellBoundariesPipeline'
+          export { calculateCellBoundaries, computeBoundsFromCellContents } from '../lib'
+          export { applyCellMargin } from '../lib/applyCellMargin'
+          EOF
+          bun build .validation/entry.ts --target=node --format=cjs --outfile ../evidence/baseline-library.cjs
+          rm .validation/entry.ts
       - name: Execute native baseline checks
         shell: bash
         run: |
@@ -81,5 +97,5 @@ jobs:
           name: cell-boundaries-baseline-evidence
           path: evidence/
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
           compression-level: 6
