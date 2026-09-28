@@ -7,7 +7,7 @@ if mode == 'tests':
     p = root / 'tests/ui/components/IOURequestStepConfirmationPageTest.tsx'
     s = p.read_text()
     edits = [
-        ("import ScreenWrapper from '@components/ScreenWrapper';", "import ScreenWrapper from '@components/ScreenWrapper';\nimport Text from '@components/Text';\n\nimport useCurrentUserPersonalDetails from '@hooks/useCurrentUserPersonalDetails';\nimport useOnyx from '@hooks/useOnyx';"),
+        ("import ScreenWrapper from '@components/ScreenWrapper';", "import ScreenWrapper from '@components/ScreenWrapper';\nimport TestText from '@components/Text';\n\nimport useCurrentUserPersonalDetails from '@hooks/useCurrentUserPersonalDetails';\nimport useOnyx from '@hooks/useOnyx';"),
         ("import CONST from '@src/CONST';", "import {NavigateGlobalCreateProvider, useNavigateGlobalCreate} from '@pages/iou/request/step/IOURequestStepScan/components/NavigateGlobalCreateContext';\n\nimport CONST from '@src/CONST';\nimport type {IOUType} from '@src/CONST';"),
         ("import ROUTES from '@src/ROUTES';", "import ROUTES from '@src/ROUTES';\nimport SCREENS from '@src/SCREENS';"),
     ]
@@ -18,6 +18,10 @@ if mode == 'tests':
     if not s.endswith('});\n'):
         raise SystemExit('Unexpected test ending')
     block = Path(__file__).with_name('route-isolation.test.txt').read_text()
+    block = block.replace('React.useState<IOUType>', "React.useState<Exclude<IOUType, 'request'>>")
+    block = block.replace('{iouType?: IOUType}', "{iouType?: Exclude<IOUType, 'request'>}")
+    block = block.replace('<Text testID="SharedCreateFlowType">{routeIOUType}</Text>', '<TestText testID="SharedCreateFlowType">{routeIOUType}</TestText>')
+    block = block.replace('<SharedCreateFlow standalone={standalone} />', '<ScreenWrapper testID="RouteIsolationParent"><SharedCreateFlow standalone={standalone} /></ScreenWrapper>')
     p.write_text(s[:-4] + block + '});\n')
 elif mode == 'production':
     p = root / 'src/pages/iou/request/step/IOURequestStepConfirmation.tsx'
