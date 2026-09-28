@@ -1,0 +1,42 @@
+name: Fixed-price Flyde 112 preparation
+on:
+  push:
+    branches: [codex-fixed-bounty-102006-20260929]
+    paths: ['.github/workflows/fixed-bounty-flyde112.yml', 'fixed-bounty-flyde112/**']
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository == 'dohyun1828/sum_test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Capture pinned public sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git init upstream
+          git -C upstream remote add origin https://github.com/flydelabs/flyde.git
+          git -C upstream fetch --depth=1 origin 913ff75c6781259da35c32fd001a90607756cb24
+          git -C upstream checkout --detach FETCH_HEAD
+          git -C upstream ls-files > evidence/tracked-files.txt
+          git -C upstream show --no-patch --format=fuller HEAD > evidence/revision.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, tarfile
+          root=Path('upstream')
+          allowed={'.ts','.tsx','.js','.jsx','.mjs','.cjs','.json','.md','.yml','.yaml','.lock','.sh','.py','.toml','.html','.css','.svg','.flyde'}
+          with tarfile.open('evidence/source.tar.gz','w:gz') as out:
+              for name in subprocess.check_output(['git','-C','upstream','ls-files','-z']).decode().split('\0'):
+                  if not name: continue
+                  p=root/name
+                  if p.is_file() and not p.is_symlink() and (p.suffix in allowed or '/' not in name) and p.suffix not in {'.ttf','.otf','.woff','.woff2','.ttc','.eot'}:
+                      out.add(p,arcname=name,recursive=False)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: fixed-bounty-flyde112-source
+          path: evidence/
+          retention-days: 7
