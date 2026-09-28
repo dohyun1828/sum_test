@@ -1,0 +1,57 @@
+name: Fixed-price issue 100243 native validation
+on:
+  push:
+    branches: [codex-fixed-bounty-102006-20260929]
+    paths: ['.github/workflows/fixed-bounty-100243.yml', 'fixed-bounty-100243/**']
+permissions:
+  contents: read
+concurrency:
+  group: fixed-bounty-100243
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'dohyun1828/sum_test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Install pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '26.5.0'
+      - name: Install pinned Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.2'
+      - name: Fetch pinned public source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/logs
+          git init upstream
+          git -C upstream remote add origin https://github.com/Expensify/App.git
+          git -C upstream fetch --depth=1 origin 201a6e128b7f7a402920de36fc70244d23b206f2
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = 201a6e128b7f7a402920de36fc70244d23b206f2
+          printf 'upstream=%s\nnode=%s\nbun=%s\n' "$(git -C upstream rev-parse HEAD)" "$(node --version)" "$(bun --version)" > evidence/environment.txt
+          date -u '+checked_at=%Y-%m-%dT%H:%M:%SZ' >> evidence/environment.txt
+      - name: Install locked dependencies without automatic lifecycle scripts
+        shell: bash
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund 2>&1 | tee ../evidence/logs/install.log
+          STANDALONE_NEW_DOT=true npm run postinstall 2>&1 | tee ../evidence/logs/postinstall.log
+      - name: Execute existing native regression suites
+        shell: bash
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          npm test -- --runInBand --watch=false --forceExit --runTestsByPath tests/unit/NavigateGlobalCreateProviderTest.tsx tests/unit/shouldUseDefaultExpensePolicyTest.ts tests/ui/components/IOURequestStepConfirmationPageTest.tsx --json --outputFile=../evidence/baseline-jest.json 2>&1 | tee ../evidence/logs/baseline-jest.log
+      - name: Retain baseline evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fixed-bounty-100243-baseline
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
