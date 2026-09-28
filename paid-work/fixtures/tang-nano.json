@@ -1,0 +1,20 @@
+{
+  "source_commit": "5714b3026ab1c1af143265e6f79d0bf428664271",
+  "source_path": "tests/repros/tang-nano-sections-stall.test.ts",
+  "input": [
+    {"cellId":"cell-0","minX":-5,"minY":-9.22,"maxX":5,"maxY":9.22},
+    {"cellId":"cell-1","minX":-36.565,"minY":-17.325,"maxX":-23.7,"maxY":10.325},
+    {"cellId":"cell-2","minX":-57.3,"minY":-7.325,"maxX":-50.7,"maxY":10.235},
+    {"cellId":"cell-3","minX":-58.3,"minY":-34.325,"maxX":-50.7,"maxY":-22.48},
+    {"cellId":"cell-4","minX":-55.3,"minY":19.675,"maxX":-6.7,"maxY":26.52},
+    {"cellId":"cell-5","minX":-50.3,"minY":32.675,"maxX":-5.7,"maxY":43.72},
+    {"cellId":"cell-6","minX":16,"minY":-28.325,"maxX":22,"maxY":-19.28},
+    {"cellId":"cell-7","minX":12.7,"minY":11.675,"maxX":33.3,"maxY":12.325},
+    {"cellId":"cell-8","minX":12.53,"minY":-12.325,"maxX":24.47,"maxY":-0.675},
+    {"cellId":"cell-9","minX":11.435,"minY":26.675,"maxX":26.565,"maxY":32.325},
+    {"cellId":"cell-10","minX":45.5,"minY":-12.22,"maxX":68.5,"maxY":2.22},
+    {"cellId":"cell-11","minX":45.8,"minY":15.48,"maxX":56.2,"maxY":16.52},
+    {"cellId":"cell-12","minX":43,"minY":-42.72,"maxX":60.3,"maxY":-20.675},
+    {"cellId":"cell-13","minX":-33.3,"minY":-35.325,"maxX":-16.7,"maxY":-21.73}
+  ]
+}
