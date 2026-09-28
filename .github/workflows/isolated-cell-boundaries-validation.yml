@@ -42,9 +42,10 @@ jobs:
         run: |
           set -euo pipefail
           cd upstream
+          sed -i 's/save = false/save = true/' bunfig.toml
           bun install --ignore-scripts 2>&1 | tee ../evidence/logs/install.log
           bun pm trust sharp 2>&1 | tee ../evidence/logs/sharp-setup.log
-          git checkout -- package.json
+          git checkout -- package.json bunfig.toml
           if test -f bun.lock; then cp bun.lock ../evidence/dependency-bun.lock; fi
           if test -f bun.lockb; then cp bun.lockb ../evidence/dependency-bun.lockb; fi
           tar --exclude='*.ttf' --exclude='*.otf' --exclude='*.woff' --exclude='*.woff2' --exclude='*.ttc' -czf ../evidence/solver-utils-package.tar.gz -C node_modules/@tscircuit solver-utils
