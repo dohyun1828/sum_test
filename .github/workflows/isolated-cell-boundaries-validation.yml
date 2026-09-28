@@ -24,20 +24,25 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: '1.4.2'
-      - name: Read pinned public upstream source
+      - name: Fetch pinned upstream and this exact preparation commit
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p evidence/logs
+          mkdir -p evidence/logs evidence/submission
           git init upstream
           git -C upstream remote add origin https://github.com/tscircuit/calculate-cell-boundaries.git
           git -C upstream fetch --depth=1 origin 5714b3026ab1c1af143265e6f79d0bf428664271
           git -C upstream checkout --detach FETCH_HEAD
           test "$(git -C upstream rev-parse HEAD)" = 5714b3026ab1c1af143265e6f79d0bf428664271
+          git init preparation
+          git -C preparation remote add origin https://github.com/dohyun1828/sum_test.git
+          git -C preparation fetch --depth=1 origin "$GITHUB_SHA"
+          git -C preparation checkout --detach FETCH_HEAD
           git -C upstream archive --format=tar.gz --output="$GITHUB_WORKSPACE/evidence/upstream-source.tar.gz" HEAD
-          printf 'upstream_commit=%s\nbun_version=%s\nnode_version=%s\n' "$(git -C upstream rev-parse HEAD)" "$(bun --version)" "$(node --version)" > evidence/environment.txt
+          cp upstream/LICENSE evidence/submission/LICENSE
+          printf 'upstream_commit=%s\npreparation_commit=%s\nbun_version=%s\nnode_version=%s\n' "$(git -C upstream rev-parse HEAD)" "$GITHUB_SHA" "$(bun --version)" "$(node --version)" > evidence/environment.txt
           date -u '+checked_at=%Y-%m-%dT%H:%M:%SZ' >> evidence/environment.txt
-      - name: Install dependencies and build only the native sharp dependency
+      - name: Install dependencies and initialize sharp
         shell: bash
         run: |
           set -euo pipefail
@@ -46,28 +51,12 @@ jobs:
           bun install --ignore-scripts 2>&1 | tee ../evidence/logs/install.log
           npm rebuild sharp --ignore-scripts=false --foreground-scripts 2>&1 | tee ../evidence/logs/sharp-setup.log
           git checkout -- package.json bunfig.toml
-          if test -f bun.lock; then cp bun.lock ../evidence/dependency-bun.lock; fi
-          if test -f bun.lockb; then cp bun.lockb ../evidence/dependency-bun.lockb; fi
-          tar --exclude='*.ttf' --exclude='*.otf' --exclude='*.woff' --exclude='*.woff2' --exclude='*.ttc' -czf ../evidence/solver-utils-package.tar.gz -C node_modules/@tscircuit solver-utils
-      - name: Produce exact baseline runtime bundle
+          cp bun.lock ../evidence/dependency-bun.lock
+      - name: Create shared validation helpers
         shell: bash
         run: |
           set -euo pipefail
-          cd upstream
-          mkdir -p .validation
-          cat > .validation/entry.ts <<'EOF'
-          export { BuildOutlineSolver } from '../lib/solvers/BuildOutlineSolver/BuildOutlineSolver'
-          export { CellBoundariesPipeline } from '../lib/solvers/CellBoundariesPipeline'
-          export { calculateCellBoundaries, computeBoundsFromCellContents } from '../lib'
-          export { applyCellMargin } from '../lib/applyCellMargin'
-          EOF
-          bun build .validation/entry.ts --target=node --format=cjs --outfile ../evidence/baseline-library.cjs
-          rm .validation/entry.ts
-      - name: Execute native baseline checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd upstream
+          cat > checks.sh <<'EOF'
           run_check() {
             local name="$1"
             shift
@@ -77,12 +66,85 @@ jobs:
             set -e
             cat "../evidence/logs/$name.log"
             printf '%s\t%s\n' "$name" "$code" >> ../evidence/check-status.tsv
+            return "$code"
           }
-          run_check test bun test
-          run_check typecheck bunx --no-install tsc --noEmit
-          run_check format bun run format:check
-          run_check build bun run build:lib
-          awk '$2 != 0 {bad=1} END {exit bad}' ../evidence/check-status.tsv
+          bundle() {
+            mkdir -p .validation
+            cat > .validation/entry.ts <<'ENTRY'
+          export { BuildOutlineSolver } from '../lib/solvers/BuildOutlineSolver/BuildOutlineSolver'
+          export { RepairBoundaryLinesSolver } from '../lib/solvers/RepairBoundaryLinesSolver/RepairBoundaryLinesSolver'
+          export { CellBoundariesPipeline } from '../lib/solvers/CellBoundariesPipeline'
+          export { calculateCellBoundaries, computeBoundsFromCellContents } from '../lib'
+          export { applyCellMargin } from '../lib/applyCellMargin'
+          ENTRY
+            bun build .validation/entry.ts --target=node --format=cjs --outfile "../evidence/$1-library.cjs"
+            rm .validation/entry.ts
+          }
+          EOF
+      - name: Execute original native checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          source ../checks.sh
+          run_check baseline-test bun test
+          run_check baseline-typecheck bunx --no-install tsc --noEmit
+          run_check baseline-format bun run format:check
+          run_check baseline-build bun run build:lib
+          bundle baseline
+      - name: Apply guarded optimization and retain frozen original oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+          root = Path('upstream')
+          p = root/'lib/solvers/RepairBoundaryLinesSolver/geometry.ts'
+          raw = p.read_bytes()
+          actual = hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest()
+          assert actual == '93e2111db3a31e511c473870112118fc40d6d02b', actual
+          s = raw.decode()
+          a = s.index('const intervalBlockedByVerticalLine =')
+          b = s.index('\nexport const sharedCellRegionCount', a)
+          c = s.index('\nexport const connectedComponentCount', b)
+          header = '// Frozen pre-optimization reference from calculate-cell-boundaries 5714b3026ab1c1af143265e6f79d0bf428664271.\nimport type { Point, Line as BLine, InputRect } from "../../lib/types"\nimport { axisValues, TOL } from "../../lib/solvers/RepairBoundaryLinesSolver/geometry"\n\nconst cellCenter = (cell: InputRect): Point => ({\n  x: (cell.minX + cell.maxX) / 2,\n  y: (cell.minY + cell.maxY) / 2,\n})\n\n'
+          reference = header + s[a:c].replace('export const sharedCellRegionCount', 'export const referenceSharedCellRegionCount') + '\n'
+          (root/'tests/fixtures/cell-regions-reference.ts').write_text(reference)
+          replacement = Path('preparation/paid-work/src/cell-region-components.ts').read_text()
+          assert replacement.startswith('const cellRegionComponents =')
+          p.write_text(s[:a] + replacement.rstrip() + '\n' + s[b:])
+          shutil.copy2('preparation/paid-work/tests/cell-region-components.test.ts', root/'tests/cell-region-components.test.ts')
+          PY
+          cd upstream
+          bunx --no-install biome format --write lib/solvers/RepairBoundaryLinesSolver/geometry.ts tests/fixtures/cell-regions-reference.ts tests/cell-region-components.test.ts
+          git add -N tests/fixtures/cell-regions-reference.ts tests/cell-region-components.test.ts
+          git diff --check
+          git diff -- lib/solvers/RepairBoundaryLinesSolver/geometry.ts tests/fixtures/cell-regions-reference.ts tests/cell-region-components.test.ts > ../evidence/submission/solution.patch
+          git diff --stat > ../evidence/submission/diff-stat.txt
+          mkdir -p ../evidence/submission/src ../evidence/submission/tests/fixtures
+          cp lib/solvers/RepairBoundaryLinesSolver/geometry.ts ../evidence/submission/src/geometry.ts
+          cp tests/cell-region-components.test.ts ../evidence/submission/tests/
+          cp tests/fixtures/cell-regions-reference.ts ../evidence/submission/tests/fixtures/
+      - name: Execute patched native checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          source ../checks.sh
+          run_check patched-test bun test
+          run_check patched-typecheck bunx --no-install tsc --noEmit
+          run_check patched-format bun run format:check
+          run_check patched-build bun run build:lib
+          bundle patched
+      - name: Compare real-circuit outputs and repeated timings
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp preparation/paid-work/fixtures/tang-nano.json evidence/submission/tang-nano.json
+          cp preparation/paid-work/tools/benchmark.cjs evidence/submission/benchmark.cjs
+          timeout 300 node preparation/paid-work/tools/benchmark.cjs evidence preparation/paid-work/fixtures/tang-nano.json 2>&1 | tee evidence/logs/benchmark.log
+          awk '$2 != 0 {bad=1} END {exit bad}' evidence/check-status.tsv
       - name: Hash evidence
         if: always()
         shell: bash
@@ -95,8 +157,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: cell-boundaries-baseline-evidence
+          name: cell-boundaries-complete-validation
           path: evidence/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
           compression-level: 6
