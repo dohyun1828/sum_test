@@ -1,0 +1,243 @@
+    describe('Global-create route isolation (#100243)', () => {
+        const SELF_DM_ID = '100243-self-dm';
+        const SCAN_TRANSACTION_ID = '100243-scan';
+        const routeTypeChanged = jest.fn();
+        let switchToScan: () => void;
+        let finishScan: () => void;
+
+        function ScanDispatchProbe() {
+            const navigateGlobalCreate = useNavigateGlobalCreate();
+            React.useEffect(() => {
+                finishScan = () => navigateGlobalCreate([SCAN_TRANSACTION_ID], false);
+            }, [navigateGlobalCreate]);
+            return null;
+        }
+
+        // setParams feeds back into the shared route, as it does in the real tab navigator.
+        // The Scan probe invokes the real post-capture provider, not a replacement navigation algorithm.
+        function SharedCreateFlow({standalone = false}: {standalone?: boolean}) {
+            const [routeIOUType, setRouteIOUType] = React.useState<IOUType>(CONST.IOU.TYPE.CREATE);
+            const [isScanActive, setIsScanActive] = React.useState(false);
+            const currentUserPersonalDetails = useCurrentUserPersonalDetails();
+            const [scanTransaction] = useOnyx(`${ONYXKEYS.COLLECTION.TRANSACTION_DRAFT}${SCAN_TRANSACTION_ID}`);
+            const navigation = React.useMemo(
+                () => ({
+                    ...mockNavigation,
+                    setParams: (update: {iouType?: IOUType}) => {
+                        if (!update.iouType) {
+                            return;
+                        }
+                        routeTypeChanged(update.iouType);
+                        setRouteIOUType(update.iouType);
+                    },
+                }),
+                [],
+            );
+            React.useEffect(() => {
+                switchToScan = () => setIsScanActive(true);
+            }, []);
+            return (
+                <>
+                    <Text testID="SharedCreateFlowType">{routeIOUType}</Text>
+                    {isScanActive ? (
+                        <NavigateGlobalCreateProvider
+                            currentUserPersonalDetails={currentUserPersonalDetails}
+                            iouType={routeIOUType}
+                            reportID=""
+                            transactionID={SCAN_TRANSACTION_ID}
+                            transaction={scanTransaction}
+                            backToReport={undefined}
+                        >
+                            <ScanDispatchProbe />
+                        </NavigateGlobalCreateProvider>
+                    ) : (
+                        <IOURequestStepConfirmationContentWithWritableReportOrNotFound
+                            route={{
+                                key: 'global-create-route-isolation',
+                                name: standalone ? SCREENS.MONEY_REQUEST.STEP_CONFIRMATION : SCREENS.MONEY_REQUEST.CREATE,
+                                params: {
+                                    action: CONST.IOU.ACTION.CREATE,
+                                    iouType: routeIOUType,
+                                    transactionID: TRANSACTION_ID,
+                                    reportID: '',
+                                },
+                            }}
+                            navigation={navigation}
+                            shouldHideHeader={!standalone}
+                        />
+                    )}
+                </>
+            );
+        }
+
+        function renderSharedFlow(standalone = false) {
+            return render(
+                <OnyxListItemProvider>
+                    <HTMLProviderWrapper>
+                        <CurrentUserPersonalDetailsProvider>
+                            <LocaleContextProvider>
+                                <SharedCreateFlow standalone={standalone} />
+                            </LocaleContextProvider>
+                        </CurrentUserPersonalDetailsProvider>
+                    </HTMLProviderWrapper>
+                </OnyxListItemProvider>,
+            );
+        }
+
+        function readDraft(transactionID = TRANSACTION_ID) {
+            return new Promise<OnyxEntry<Transaction>>((resolve) => {
+                const connection = Onyx.connect({
+                    key: `${ONYXKEYS.COLLECTION.TRANSACTION_DRAFT}${transactionID}`,
+                    callback: (value) => {
+                        resolve(value);
+                        Onyx.disconnect(connection);
+                    },
+                });
+            });
+        }
+
+        beforeEach(async () => {
+            mockSelectedParticipants = [];
+            mockSelectedPolicy = undefined;
+            await signInWithTestUser(ACCOUNT_ID, ACCOUNT_LOGIN);
+            await act(async () => {
+                await Onyx.set(ONYXKEYS.NVP_ACTIVE_POLICY_ID, POLICY_ID);
+                await Onyx.set(`${ONYXKEYS.COLLECTION.POLICY}${POLICY_ID}`, {
+                    id: POLICY_ID,
+                    type: CONST.POLICY.TYPE.CORPORATE,
+                    name: 'Submissions disabled',
+                    role: CONST.POLICY.ROLE.ADMIN,
+                    owner: ACCOUNT_LOGIN,
+                    ownerAccountID: ACCOUNT_ID,
+                    autoReporting: false,
+                    harvesting: {enabled: false},
+                    outputCurrency: 'USD',
+                });
+                await Onyx.set(ONYXKEYS.SELF_DM_REPORT_ID, SELF_DM_ID);
+                await Onyx.set(`${ONYXKEYS.COLLECTION.REPORT}${SELF_DM_ID}`, {
+                    reportID: SELF_DM_ID,
+                    type: CONST.REPORT.TYPE.CHAT,
+                    chatType: CONST.REPORT.CHAT_TYPE.SELF_DM,
+                    participants: {[ACCOUNT_ID]: {}},
+                });
+                await Onyx.set(`${ONYXKEYS.COLLECTION.TRANSACTION_DRAFT}${TRANSACTION_ID}`, {
+                    transactionID: TRANSACTION_ID,
+                    reportID: '',
+                    amount: 1000,
+                    isAmountSet: true,
+                    currency: 'USD',
+                    merchant: 'Coffee',
+                    created: '2025-08-29',
+                    isFromGlobalCreate: true,
+                    iouRequestType: CONST.IOU.REQUEST_TYPE.MANUAL,
+                });
+            });
+        });
+
+        it('assigns the default self DM without rewriting the shared create route', async () => {
+            renderSharedFlow();
+            await waitForBatchedUpdatesWithAct();
+            const draft = await readDraft();
+            expect(draft?.participants?.at(0)?.reportID).toBe(SELF_DM_ID);
+            expect(draft?.reportID).toBe(CONST.REPORT.UNREPORTED_REPORT_ID);
+            expect(screen.getByTestId('SharedCreateFlowType')).toHaveTextContent(CONST.IOU.TYPE.CREATE);
+            expect(routeTypeChanged).not.toHaveBeenCalled();
+        });
+
+        it('opens self-DM confirmation after Manual assigns the default and Scan completes', async () => {
+            renderSharedFlow();
+            await waitForBatchedUpdatesWithAct();
+            expect((await readDraft())?.participants?.at(0)?.reportID).toBe(SELF_DM_ID);
+            await act(async () => {
+                await Onyx.set(`${ONYXKEYS.COLLECTION.TRANSACTION_DRAFT}${SCAN_TRANSACTION_ID}`, {
+                    transactionID: SCAN_TRANSACTION_ID,
+                    reportID: '',
+                    amount: 0,
+                    currency: 'USD',
+                    created: '2025-08-29',
+                    merchant: '',
+                    isFromGlobalCreate: true,
+                    iouRequestType: CONST.IOU.REQUEST_TYPE.SCAN,
+                    receipt: {filename: 'receipt.jpg', source: 'fixture://receipt.jpg', type: 'image/jpeg'},
+                });
+                switchToScan();
+            });
+            await waitForBatchedUpdatesWithAct();
+            await waitForBatchedUpdatesWithAct();
+            jest.mocked(Navigation.navigate).mockClear();
+            act(() => finishScan());
+            await waitForBatchedUpdatesWithAct();
+            expect(Navigation.navigate).toHaveBeenCalledTimes(1);
+            expect(Navigation.navigate).toHaveBeenCalledWith(
+                ROUTES.MONEY_REQUEST_STEP_CONFIRMATION.getRoute(CONST.IOU.ACTION.CREATE, CONST.IOU.TYPE.TRACK, SCAN_TRANSACTION_ID, SELF_DM_ID),
+            );
+            const draft = await readDraft(SCAN_TRANSACTION_ID);
+            expect(draft?.participants?.at(0)?.reportID).toBe(SELF_DM_ID);
+            expect(draft?.reportID).toBe(CONST.REPORT.UNREPORTED_REPORT_ID);
+        });
+
+        it('tracks a persisted self-DM draft on a fresh create route without rewriting it', async () => {
+            await act(async () => {
+                await Onyx.merge(`${ONYXKEYS.COLLECTION.TRANSACTION_DRAFT}${TRANSACTION_ID}`, {
+                    reportID: CONST.REPORT.UNREPORTED_REPORT_ID,
+                    participants: [{accountID: 0, isSelfDM: true, reportID: SELF_DM_ID, selected: true}],
+                });
+            });
+            renderSharedFlow();
+            await waitForBatchedUpdatesWithAct();
+            fireEvent.press(await screen.findByText(/^Create .*expense/i));
+            await waitFor(() => expect(TrackExpense.trackExpense).toHaveBeenCalledTimes(1));
+            expect(TrackExpense.requestMoney).not.toHaveBeenCalled();
+            expect(routeTypeChanged).not.toHaveBeenCalled();
+        });
+
+        it('keeps explicit self-DM selections local to the manual confirmation', async () => {
+            await act(async () => {
+                await Onyx.merge(`${ONYXKEYS.COLLECTION.TRANSACTION_DRAFT}${TRANSACTION_ID}`, {
+                    participants: [{accountID: PARTICIPANT_ACCOUNT_ID, login: 'recipient@user.com', selected: true}],
+                });
+            });
+            renderSharedFlow();
+            await waitForBatchedUpdatesWithAct();
+            mockSelectedParticipants = [{accountID: 0, isSelfDM: true, reportID: SELF_DM_ID, selected: true}];
+            fireEvent.press(await screen.findByTestId('MockParticipantPicker'));
+            await waitForBatchedUpdatesWithAct();
+            expect((await readDraft())?.participants?.at(0)?.reportID).toBe(SELF_DM_ID);
+            expect(screen.getByTestId('SharedCreateFlowType')).toHaveTextContent(CONST.IOU.TYPE.CREATE);
+            expect(routeTypeChanged).not.toHaveBeenCalled();
+        });
+
+        it('returns to a workspace destination without changing the global route', async () => {
+            await act(async () => {
+                await Onyx.set(`${ONYXKEYS.COLLECTION.REPORT}${POLICY_CHAT_REPORT_ID}`, {
+                    reportID: POLICY_CHAT_REPORT_ID,
+                    policyID: POLICY_ID,
+                    type: CONST.REPORT.TYPE.CHAT,
+                    chatType: CONST.REPORT.CHAT_TYPE.POLICY_EXPENSE_CHAT,
+                    isOwnPolicyExpenseChat: true,
+                    ownerAccountID: ACCOUNT_ID,
+                    participants: {[ACCOUNT_ID]: {}},
+                });
+            });
+            renderSharedFlow();
+            await waitForBatchedUpdatesWithAct();
+            expect((await readDraft())?.reportID).toBe(CONST.REPORT.UNREPORTED_REPORT_ID);
+            mockSelectedParticipants = [{reportID: POLICY_CHAT_REPORT_ID, policyID: POLICY_ID, isPolicyExpenseChat: true, selected: true}];
+            fireEvent.press(await screen.findByTestId('MockParticipantPicker'));
+            await waitForBatchedUpdatesWithAct();
+            expect((await readDraft())?.reportID).toBe(POLICY_CHAT_REPORT_ID);
+            expect(screen.getByTestId('SharedCreateFlowType')).toHaveTextContent(CONST.IOU.TYPE.CREATE);
+            expect(routeTypeChanged).not.toHaveBeenCalled();
+            fireEvent.press(await screen.findByText(/^Create .*expense/i));
+            await waitFor(() => expect(TrackExpense.requestMoney).toHaveBeenCalledTimes(1));
+            expect(TrackExpense.trackExpense).not.toHaveBeenCalled();
+        });
+
+        it('preserves the route update on a standalone confirmation', async () => {
+            renderSharedFlow(true);
+            await waitForBatchedUpdatesWithAct();
+            expect((await readDraft())?.participants?.at(0)?.reportID).toBe(SELF_DM_ID);
+            expect(screen.getByTestId('SharedCreateFlowType')).toHaveTextContent(CONST.IOU.TYPE.TRACK);
+            expect(routeTypeChanged).toHaveBeenCalledWith(CONST.IOU.TYPE.TRACK);
+        });
+    });
