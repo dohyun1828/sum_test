@@ -1,0 +1,85 @@
+name: Isolated cell-boundaries validation
+
+on:
+  push:
+    branches: [codex-paid-preflight-20260928]
+    paths:
+      - '.github/workflows/isolated-cell-boundaries-validation.yml'
+      - 'paid-work/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cell-boundaries-preparation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'dohyun1828/sum_test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: latest
+      - name: Read pinned public upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/logs
+          git init upstream
+          git -C upstream remote add origin https://github.com/tscircuit/calculate-cell-boundaries.git
+          git -C upstream fetch --depth=1 origin 5714b3026ab1c1af143265e6f79d0bf428664271
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = 5714b3026ab1c1af143265e6f79d0bf428664271
+          git -C upstream archive --format=tar.gz --output="$GITHUB_WORKSPACE/evidence/upstream-source.tar.gz" HEAD
+          printf 'upstream_commit=%s\nbun_version=%s\nnode_version=%s\n' "$(git -C upstream rev-parse HEAD)" "$(bun --version)" "$(node --version)" > evidence/environment.txt
+          date -u '+checked_at=%Y-%m-%dT%H:%M:%SZ' >> evidence/environment.txt
+      - name: Install public dependencies without lifecycle scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          bun install --ignore-scripts 2>&1 | tee ../evidence/logs/install.log
+          if test -f bun.lock; then cp bun.lock ../evidence/dependency-bun.lock; fi
+          if test -f bun.lockb; then cp bun.lockb ../evidence/dependency-bun.lockb; fi
+          tar --exclude='*.ttf' --exclude='*.otf' --exclude='*.woff' --exclude='*.woff2' --exclude='*.ttc' -czf ../evidence/solver-utils-package.tar.gz -C node_modules/@tscircuit solver-utils
+      - name: Execute native baseline checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          run_check() {
+            local name="$1"
+            shift
+            set +e
+            timeout 240 "$@" > "../evidence/logs/$name.log" 2>&1
+            local code=$?
+            set -e
+            cat "../evidence/logs/$name.log"
+            printf '%s\t%s\n' "$name" "$code" >> ../evidence/check-status.tsv
+          }
+          run_check test bun test
+          run_check typecheck bunx --no-install tsc --noEmit
+          run_check format bun run format:check
+          run_check build bun run build:lib
+          awk '$2 != 0 {bad=1} END {exit bad}' ../evidence/check-status.tsv
+      - name: Hash evidence
+        if: always()
+        shell: bash
+        run: |
+          if test -d evidence; then
+            cd evidence
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
+          fi
+      - name: Retain validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cell-boundaries-baseline-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
