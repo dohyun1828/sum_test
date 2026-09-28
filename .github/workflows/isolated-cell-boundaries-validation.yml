@@ -37,14 +37,14 @@ jobs:
           git -C upstream archive --format=tar.gz --output="$GITHUB_WORKSPACE/evidence/upstream-source.tar.gz" HEAD
           printf 'upstream_commit=%s\nbun_version=%s\nnode_version=%s\n' "$(git -C upstream rev-parse HEAD)" "$(bun --version)" "$(node --version)" > evidence/environment.txt
           date -u '+checked_at=%Y-%m-%dT%H:%M:%SZ' >> evidence/environment.txt
-      - name: Install dependencies and explicitly trust only sharp
+      - name: Install dependencies and build only the native sharp dependency
         shell: bash
         run: |
           set -euo pipefail
           cd upstream
           sed -i 's/save = false/save = true/' bunfig.toml
           bun install --ignore-scripts 2>&1 | tee ../evidence/logs/install.log
-          bun pm trust sharp 2>&1 | tee ../evidence/logs/sharp-setup.log
+          npm rebuild sharp --ignore-scripts=false --foreground-scripts 2>&1 | tee ../evidence/logs/sharp-setup.log
           git checkout -- package.json bunfig.toml
           if test -f bun.lock; then cp bun.lock ../evidence/dependency-bun.lock; fi
           if test -f bun.lockb; then cp bun.lockb ../evidence/dependency-bun.lockb; fi
