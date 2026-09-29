@@ -1,0 +1,139 @@
+name: Expensify 100243 native validation
+on:
+  push:
+    branches: [expensify-100243-native-20260929]
+    paths:
+      - '.github/workflows/expensify-100243-native.yml'
+      - 'paid-work/expensify-100243/**'
+permissions:
+  contents: read
+concurrency:
+  group: expensify-100243-native
+  cancel-in-progress: true
+jobs:
+  validate:
+    if: github.repository == 'dohyun1828/sum_test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+      STANDALONE_NEW_DOT: 'true'
+    steps:
+      - name: Fetch pinned upstream and preparation source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/logs evidence/submission
+          git init upstream
+          git -C upstream remote add origin https://github.com/Expensify/App.git
+          git -C upstream fetch --depth=1 origin d651fff8ee990294a6784db3b619e58f74bf3594
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = d651fff8ee990294a6784db3b619e58f74bf3594
+          git init preparation
+          git -C preparation remote add origin https://github.com/dohyun1828/sum_test.git
+          git -C preparation fetch --depth=1 origin "$GITHUB_SHA"
+          git -C preparation checkout --detach FETCH_HEAD
+          cp upstream/LICENSE.md evidence/LICENSE-Expensify.md
+          cp upstream/package.json evidence/upstream-package.json
+          cp upstream/package-lock.json evidence/upstream-package-lock.json
+          printf 'upstream=%s\npreparation=%s\n' "$(git -C upstream rev-parse HEAD)" "$GITHUB_SHA" > evidence/environment.txt
+          date -u '+executed_at=%Y-%m-%dT%H:%M:%SZ' >> evidence/environment.txt
+      - name: Install declared Node version
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: upstream/.nvmrc
+          package-manager-cache: false
+      - name: Install Bun for repository scripts
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.2'
+      - name: Install locked dependencies and reviewed postinstall
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'node=%s\nnpm=%s\nbun=%s\n' "$(node --version)" "$(npm --version)" "$(bun --version)" >> evidence/environment.txt
+          cd upstream
+          npm ci --ignore-scripts --no-audit --no-fund 2>&1 | tee ../evidence/logs/install.log
+          npm run postinstall 2>&1 | tee ../evidence/logs/postinstall.log
+      - name: Execute baseline and candidate checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE="$GITHUB_WORKSPACE/evidence"
+          export EVIDENCE
+          cd upstream
+          TARGET=src/pages/iou/request/step/IOURequestStepScan/components/NavigateGlobalCreateContext.tsx
+          TEST=tests/unit/NavigateGlobalCreateRoutingTest.tsx
+          run_check() {
+            local name="$1"
+            shift
+            set +e
+            timeout 300 "$@" > "$EVIDENCE/logs/$name.log" 2>&1
+            local code=$?
+            set -e
+            tail -100 "$EVIDENCE/logs/$name.log"
+            printf '%s\t%s\n' "$name" "$code" >> "$EVIDENCE/check-status.tsv"
+          }
+          run_check original-native npm test -- --runInBand --runTestsByPath tests/unit/NavigateGlobalCreateProviderTest.tsx --json --outputFile="$EVIDENCE/original-native.json"
+          run_check original-typecheck npm run typecheck
+          cp ../preparation/paid-work/expensify-100243/NavigateGlobalCreateRoutingTest.tsx "$TEST"
+          ./node_modules/.bin/oxfmt --write "$TEST"
+          run_check reproduction npm test -- --runInBand --runTestsByPath "$TEST" --json --outputFile="$EVIDENCE/reproduction.json"
+          test "$(git hash-object "$TARGET")" = 2ea15b28a6702c2289c23d8308d1478b079233d8
+          cp "$TARGET" "$EVIDENCE/original-NavigateGlobalCreateContext.tsx"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/pages/iou/request/step/IOURequestStepScan/components/NavigateGlobalCreateContext.tsx')
+          s = p.read_text()
+          old = '        if (shouldUseDefaultExpensePolicy(iouType, defaultExpensePolicy, amountOwed, userBillingGracePeriodEnds, ownerBillingGracePeriodEnd, currentUserPersonalDetails.accountID)) {\n            const shouldAutoReport = !!defaultExpensePolicy?.autoReporting || !!personalPolicy?.autoReporting;'
+          new = '        const isTrackingExpense = iouType === CONST.IOU.TYPE.TRACK;\n        if (\n            isTrackingExpense ||\n            shouldUseDefaultExpensePolicy(iouType, defaultExpensePolicy, amountOwed, userBillingGracePeriodEnds, ownerBillingGracePeriodEnd, currentUserPersonalDetails.accountID)\n        ) {\n            const shouldAutoReport = !isTrackingExpense && (!!defaultExpensePolicy?.autoReporting || !!personalPolicy?.autoReporting);'
+          assert s.count(old) == 1, 'The pinned patch seam changed'
+          p.write_text(s.replace(old, new))
+          PY
+          ./node_modules/.bin/oxfmt --write "$TARGET"
+          run_check patched-native npm test -- --runInBand --runTestsByPath "$TEST" tests/unit/NavigateGlobalCreateProviderTest.tsx --json --outputFile="$EVIDENCE/patched-native.json"
+          run_check patched-typecheck npm run typecheck
+          run_check patched-lint bun scripts/lint/index.ts "$TARGET" "$TEST"
+          run_check patched-build npm run build
+          cp "$TARGET" "$EVIDENCE/submission/NavigateGlobalCreateContext.tsx"
+          cp "$TEST" "$EVIDENCE/submission/NavigateGlobalCreateRoutingTest.tsx"
+          git add -N "$TEST"
+          git diff -- "$TARGET" "$TEST" > "$EVIDENCE/submission/solution.patch"
+          git diff --check
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['EVIDENCE'])
+          statuses = dict(line.split('\t') for line in (root/'check-status.tsv').read_text().splitlines())
+          summary = {'statuses': statuses, 'counts': {}, 'payment_approved': False, 'submitted_to_employer': False}
+          for name in ['original-native', 'reproduction', 'patched-native']:
+              path = root/f'{name}.json'
+              if path.exists():
+                  data = json.loads(path.read_text())
+                  summary['counts'][name] = {key:data.get(key) for key in ['numTotalTests','numPassedTests','numFailedTests','numRuntimeErrorTestSuites','success']}
+          (root/'summary.json').write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2))
+          assert statuses['original-native'] == '0', 'Original native test did not pass'
+          repro = summary['counts'].get('reproduction', {})
+          assert repro.get('numFailedTests',0)>0 and repro.get('numRuntimeErrorTestSuites',1)==0, 'No valid original regression reproduced'
+          assert statuses['patched-native'] == '0', 'Candidate native test did not pass'
+          assert statuses['patched-typecheck'] == '0', 'Candidate typecheck did not pass'
+          assert statuses['patched-lint'] == '0', 'Candidate lint did not pass'
+          assert statuses['patched-build'] == '0', 'Candidate build did not pass'
+          PY
+      - name: Hash retained evidence
+        if: always()
+        shell: bash
+        run: |
+          if test -d evidence; then
+            cd evidence
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
+          fi
+      - name: Retain results, code and logs only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: expensify-100243-native-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
