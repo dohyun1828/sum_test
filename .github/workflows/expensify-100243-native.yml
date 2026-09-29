@@ -51,9 +51,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf 'node=%s\nnpm=%s\nbun=%s\n' "$(node --version)" "$(npm --version)" "$(bun --version)" >> evidence/environment.txt
+          BUN_RUNTIME="$(command -v bun)"
+          printf 'node=%s\nnpm=%s\nbun=%s\nbun_runtime=%s\n' "$(node --version)" "$(npm --version)" "$(bun --version)" "$BUN_RUNTIME" >> evidence/environment.txt
           cd upstream
           npm ci --ignore-scripts --no-audit --no-fund 2>&1 | tee ../evidence/logs/install.log
+          ln -sfn "$BUN_RUNTIME" node_modules/.bin/bun
           npm run postinstall 2>&1 | tee ../evidence/logs/postinstall.log
       - name: Execute baseline and candidate checks
         shell: bash
