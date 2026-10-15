@@ -49,6 +49,8 @@ jobs:
           COMMON='-O1 -g -fno-omit-frame-pointer -fsanitize=address -D_DEBUG -DDEBUG -DUNIX -DUNIX_LINUX -DCPU_64 -D_REENTRANT -DREENTRANT -D_THREAD_SAFE -D_THREADSAFE -DTHREAD_SAFE -DTHREADSAFE -D_FILE_OFFSET_BITS=64 -Isoftether/src -Isoftether/src/Cedar -Isoftether/src/Mayaqua -fsigned-char -m64'
           LIBS='-lm -ldl -lrt -lpthread -lssl -lcrypto -lreadline -lncurses -lz'
           clang $COMMON softether_audit/udp_login_uaf_probe.c softether/tmp/as/vpnserver.a $LIBS -o results/udp_login_uaf_probe
+          cp softether/bin/vpnserver/hamcore.se2 results/hamcore.se2
+          chmod 600 results/hamcore.se2
       - name: Start isolated server
         run: |
           chmod 700 softether/bin/vpnserver/vpnserver softether/bin/vpncmd/vpncmd
