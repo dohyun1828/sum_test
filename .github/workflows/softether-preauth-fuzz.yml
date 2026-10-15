@@ -45,7 +45,9 @@ jobs:
           clang $COMMON softether_audit/fuzz_x509.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/fuzz_x509
           GEN='-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize=shift -D_DEBUG -DDEBUG -DUNIX -DUNIX_LINUX -DCPU_64 -D_REENTRANT -DREENTRANT -D_THREAD_SAFE -D_THREADSAFE -DTHREAD_SAFE -DTHREADSAFE -D_FILE_OFFSET_BITS=64 -Isoftether/src -Isoftether/src/Cedar -Isoftether/src/Mayaqua -fsigned-char -m64'
           clang $GEN softether_audit/gen_pack_corpus.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/gen_pack_corpus
+          ln -sfn "$PWD/results/bin/gen_pack_corpus" a.out
           ./results/bin/gen_pack_corpus
+          test -s corpus/pack/login_password
           printf 'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n' > corpus/http_header/get
           printf 'POST /vpnsvc/vpn.cgi HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nAAAA' > corpus/http_header/post
           printf 'SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n' > corpus/http_header/sstp
@@ -57,12 +59,16 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           set +e
+          ln -sfn "$PWD/results/bin/fuzz_pack" a.out
           ./results/bin/fuzz_pack corpus/pack -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=2097152 -artifact_prefix=results/crashes/pack- > results/fuzz_pack.log 2>&1
           echo $? > results/fuzz_pack.exit
+          ln -sfn "$PWD/results/bin/fuzz_http_pack" a.out
           ./results/bin/fuzz_http_pack corpus/pack -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=1048576 -artifact_prefix=results/crashes/http-pack- > results/fuzz_http_pack.log 2>&1
           echo $? > results/fuzz_http_pack.exit
+          ln -sfn "$PWD/results/bin/fuzz_http_header" a.out
           ./results/bin/fuzz_http_header corpus/http_header -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=262144 -artifact_prefix=results/crashes/http-header- > results/fuzz_http_header.log 2>&1
           echo $? > results/fuzz_http_header.exit
+          ln -sfn "$PWD/results/bin/fuzz_x509" a.out
           ./results/bin/fuzz_x509 corpus/x509 -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=524288 -artifact_prefix=results/crashes/x509- > results/fuzz_x509.log 2>&1
           echo $? > results/fuzz_x509.exit
           set -e
@@ -75,13 +81,14 @@ jobs:
           out={'targets':{},'artifacts':[],'sanitizer_findings':[]}
           for name in ['fuzz_pack','fuzz_http_pack','fuzz_http_header','fuzz_x509']:
               log=(r/(name+'.log')).read_text(errors='replace')
-              m=re.findall(r'#(\d+)\s+DONE.*?cov:\s*(\d+).*?ft:\s*(\d+)',log)
+              done=re.findall(r'#(\d+)\s+DONE.*?cov:\s*(\d+).*?ft:\s*(\d+)',log)
               out['targets'][name]={
                   'exit':(r/(name+'.exit')).read_text().strip(),
-                  'last_done':m[-1] if m else None,
+                  'last_done':done[-1] if done else None,
                   'executed_units':max([int(x) for x in re.findall(r'#(\d+)',log)] or [0]),
+                  'log_bytes':len(log.encode()),
               }
-              for marker in ['ERROR: AddressSanitizer','runtime error:','UndefinedBehaviorSanitizer','SUMMARY: AddressSanitizer']:
+              for marker in ['ERROR: AddressSanitizer','runtime error:','UndefinedBehaviorSanitizer','SUMMARY: AddressSanitizer','ERROR: libFuzzer']:
                   if marker in log:
                       out['sanitizer_findings'].append({'target':name,'marker':marker})
           out['artifacts']=[str(p) for p in sorted((r/'crashes').glob('*'))]
