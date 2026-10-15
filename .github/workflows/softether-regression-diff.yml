@@ -1,0 +1,93 @@
+name: SoftEther security regression mining
+
+on:
+  push:
+    branches:
+      - audit/softether-preauth-20261015
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mine:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch source histories
+        run: |
+          git clone https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git stable
+          git clone https://github.com/SoftEtherVPN/SoftEtherVPN.git developer
+          mkdir -p regression-results
+      - name: Extract security-relevant changes
+        run: |
+          python3 - <<'PY'
+          import json,re,subprocess
+          from pathlib import Path
+
+          out=Path('regression-results')
+          base='v4.34-9745-beta'
+          head='v4.44-9807-rtm'
+          paths=['src/Cedar','src/Mayaqua']
+          diff=subprocess.check_output(['git','-C','stable','diff','--find-renames','--unified=50',f'{base}..{head}','--',*paths],text=True,errors='replace')
+          (out/'stable-full.diff').write_text(diff)
+          keywords=re.compile(r'(auth|password|secure_password|administrator|admin|serveradmin|hubname|check_right|not_enough_right|access_denied|certificate|signature|ticket|session_key|jsonrpc|webui|rpc|monitor|bridge|routing|listener|localbridge|logfile|filename|path|strcpy|copy\s*\(|malloc|realloc|size|length|overflow|underflow|memcmp|cmp\s*\(|radius|sstp|openvpn|ike|ipsec|l2tp|http|host|url|proxy|download|verify|random|nonce|cookie|secret)',re.I)
+          public_known=re.compile(r'(CVE|invalid SPI|Message-Authenticator|AEAD|OpenVPN.*data channel|IPsec.*reflection)',re.I)
+          hunks=[]
+          current_file=''
+          current=[]
+          old_start=new_start=0
+          def flush():
+              nonlocal current
+              if not current: return
+              text='\n'.join(current)
+              changed='\n'.join(x for x in current if x[:1] in '+-' and not x.startswith(('+++','---')))
+              if keywords.search(changed):
+                  hunks.append({'file':current_file,'old_start':old_start,'new_start':new_start,'known_advisory_terms':bool(public_known.search(text)),'text':text})
+              current=[]
+          for line in diff.splitlines():
+              if line.startswith('diff --git '):
+                  flush(); current_file=line.split(' b/',1)[-1]
+              if line.startswith('@@ '):
+                  flush()
+                  m=re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)',line)
+                  old_start=int(m.group(1)) if m else 0
+                  new_start=int(m.group(2)) if m else 0
+                  current=[line]
+              elif current:
+                  current.append(line)
+          flush()
+          (out/'security-hunks.json').write_text(json.dumps(hunks,indent=2))
+          (out/'security-hunks.txt').write_text('\n\n===== HUNK =====\n\n'.join(f"FILE={h['file']} OLD={h['old_start']} NEW={h['new_start']} KNOWN={h['known_advisory_terms']}\n{h['text']}" for h in hunks))
+
+          added=[]
+          patterns=[
+              r'^\+[^+].*(SERVER_ADMIN_ONLY|CHECK_RIGHT|ERR_NOT_ENOUGH_RIGHT|ERR_ACCESS_DENIED)',
+              r'^\+[^+].*(PackGetDataSize|GetContentLength|MAX_|MIN_|sizeof).*',
+              r'^\+[^+].*(CheckSignature|Verify|CompareX|SecurePassword|CheckAdminSourceAddress).*',
+              r'^\+[^+].*(IsLocalHostIP|IsIPMyHost|RemoteIP|SourceAddress).*',
+          ]
+          for i,line in enumerate(diff.splitlines()):
+              if any(re.search(p,line,re.I) for p in patterns):
+                  added.append('\n'.join(diff.splitlines()[max(0,i-12):i+13]))
+          seen=[]
+          for x in added:
+              if x not in seen: seen.append(x)
+          (out/'new-security-checks.txt').write_text('\n\n===== CHECK =====\n\n'.join(seen))
+
+          commits=subprocess.check_output(['git','-C','stable','log','--date=iso','--pretty=format:%H\t%ad\t%s',f'{base}..{head}'],text=True)
+          (out/'commits.tsv').write_text(commits)
+          summary={'total_diff_lines':len(diff.splitlines()),'security_hunks':len(hunks),'without_known_terms':sum(not h['known_advisory_terms'] for h in hunks),'added_check_contexts':len(seen)}
+          (out/'summary.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          PY
+      - name: Generate exact per-file statistics
+        run: |
+          git -C stable diff --stat v4.34-9745-beta..v4.44-9807-rtm -- src/Cedar src/Mayaqua > regression-results/diff-stat.txt
+          git -C stable diff --numstat v4.34-9745-beta..v4.44-9807-rtm -- src/Cedar src/Mayaqua > regression-results/diff-numstat.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: softether-regression-mining
+          path: regression-results/
+          retention-days: 14
