@@ -1,0 +1,95 @@
+name: SoftEther 4.34 pre-auth fuzz
+
+on:
+  push:
+    branches:
+      - audit/softether-preauth-20261015
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang build-essential libssl-dev libreadline-dev libncurses5-dev zlib1g-dev openssl
+      - name: Fetch exact target source
+        run: git clone --depth 1 --branch v4.34-9745-beta https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git softether
+      - name: Build all source with libFuzzer coverage ASan and UBSan
+        working-directory: softether
+        run: |
+          chmod +x configure
+          ./configure
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('Makefile')
+          s=p.read_text()
+          s=s.replace('CC=cc', 'CC=clang')
+          s=s.replace('OPTIONS_COMPILE_DEBUG=', 'OPTIONS_COMPILE_DEBUG=-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined ')
+          s=s.replace('OPTIONS_LINK_DEBUG=', 'OPTIONS_LINK_DEBUG=-g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined ')
+          p.write_text(s)
+          PY
+          make -j2 DEBUG=YES
+      - name: Build fuzz targets and valid corpus
+        run: |
+          mkdir -p results/bin results/crashes corpus/http_header corpus/x509
+          COMMON='-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined -fno-sanitize=shift -D_DEBUG -DDEBUG -DUNIX -DUNIX_LINUX -DCPU_64 -D_REENTRANT -DREENTRANT -D_THREAD_SAFE -D_THREADSAFE -DTHREAD_SAFE -DTHREADSAFE -D_FILE_OFFSET_BITS=64 -Isoftether/src -Isoftether/src/Cedar -Isoftether/src/Mayaqua -fsigned-char -m64'
+          LIBS='-lm -ldl -lrt -lpthread -lssl -lcrypto -lreadline -lncurses -lz'
+          clang $COMMON softether_audit/fuzz_pack.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/fuzz_pack
+          clang $COMMON softether_audit/fuzz_http_pack.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/fuzz_http_pack
+          clang $COMMON softether_audit/fuzz_http_header.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/fuzz_http_header
+          clang $COMMON softether_audit/fuzz_x509.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/fuzz_x509
+          GEN='-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize=shift -D_DEBUG -DDEBUG -DUNIX -DUNIX_LINUX -DCPU_64 -D_REENTRANT -DREENTRANT -D_THREAD_SAFE -D_THREADSAFE -DTHREAD_SAFE -DTHREADSAFE -D_FILE_OFFSET_BITS=64 -Isoftether/src -Isoftether/src/Cedar -Isoftether/src/Mayaqua -fsigned-char -m64'
+          clang $GEN softether_audit/gen_pack_corpus.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/gen_pack_corpus
+          ./results/bin/gen_pack_corpus
+          printf 'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n' > corpus/http_header/get
+          printf 'POST /vpnsvc/connect.cgi HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nAAAA' > corpus/http_header/post
+          printf 'SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n' > corpus/http_header/sstp
+          openssl req -x509 -newkey rsa:2048 -nodes -subj '/CN=fuzz' -keyout /tmp/key.pem -out corpus/x509/cert.pem -days 1
+          openssl x509 -in corpus/x509/cert.pem -outform DER -out corpus/x509/cert.der
+      - name: Run coverage guided fuzzers
+        env:
+          ASAN_OPTIONS: abort_on_error=1:detect_leaks=0:symbolize=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set +e
+          ./results/bin/fuzz_pack corpus/pack -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=2097152 -artifact_prefix=results/crashes/pack- > results/fuzz_pack.log 2>&1
+          echo $? > results/fuzz_pack.exit
+          ./results/bin/fuzz_http_pack corpus/pack -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=1048576 -artifact_prefix=results/crashes/http-pack- > results/fuzz_http_pack.log 2>&1
+          echo $? > results/fuzz_http_pack.exit
+          ./results/bin/fuzz_http_header corpus/http_header -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=262144 -artifact_prefix=results/crashes/http-header- > results/fuzz_http_header.log 2>&1
+          echo $? > results/fuzz_http_header.exit
+          ./results/bin/fuzz_x509 corpus/x509 -max_total_time=300 -timeout=3 -rss_limit_mb=3072 -max_len=524288 -artifact_prefix=results/crashes/x509- > results/fuzz_x509.log 2>&1
+          echo $? > results/fuzz_x509.exit
+          set -e
+      - name: Summarize findings
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          r=Path('results')
+          out={'targets':{},'artifacts':[],'sanitizer_findings':[]}
+          for name in ['fuzz_pack','fuzz_http_pack','fuzz_http_header','fuzz_x509']:
+              log=(r/(name+'.log')).read_text(errors='replace')
+              m=re.findall(r'#(\d+)\s+DONE.*?cov:\s*(\d+).*?ft:\s*(\d+)',log)
+              out['targets'][name]={
+                  'exit':(r/(name+'.exit')).read_text().strip(),
+                  'last_done':m[-1] if m else None,
+                  'executed_units':max([int(x) for x in re.findall(r'#(\d+)',log)] or [0]),
+              }
+              for marker in ['ERROR: AddressSanitizer','runtime error:','UndefinedBehaviorSanitizer','SUMMARY: AddressSanitizer']:
+                  if marker in log:
+                      out['sanitizer_findings'].append({'target':name,'marker':marker})
+          out['artifacts']=[str(p) for p in sorted((r/'crashes').glob('*'))]
+          (r/'summary.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: softether-preauth-fuzz
+          path: results/
+          retention-days: 14
