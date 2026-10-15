@@ -1,0 +1,29 @@
+name: SoftEther 4.34 source snapshot
+
+on:
+  push:
+    branches:
+      - audit/softether-preauth-20261015
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact target source
+        run: git clone --depth 1 --branch v4.34-9745-beta https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git softether
+      - name: Record identity
+        run: |
+          mkdir -p snapshot
+          git -C softether rev-parse HEAD > snapshot/commit.txt
+          cp -a softether/src snapshot/src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: softether-4.34-source
+          path: snapshot/
+          retention-days: 14
