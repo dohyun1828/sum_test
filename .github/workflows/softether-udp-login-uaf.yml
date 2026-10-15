@@ -1,0 +1,122 @@
+name: SoftEther unauth UDP-login memory corruption
+
+on:
+  push:
+    branches:
+      - audit/softether-preauth-20261015
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-22.04
+    container: ubuntu:20.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates clang build-essential libssl-dev libreadline-dev libncurses5-dev zlib1g-dev python3 iproute2 procps
+      - name: Fetch exact target
+        run: git clone --depth 1 --branch v4.34-9745-beta https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git softether
+      - name: Build ASan and UBSan server
+        working-directory: softether
+        run: |
+          chmod +x configure
+          ./configure
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          server=Path('src/Cedar/Server.c')
+          s=server.read_text()
+          old='void FlushServerCaps(SERVER *s)\n{'
+          if old not in s:
+              old='void FlushServerCaps(SERVER *s)\r\n{'
+          if old not in s:
+              raise SystemExit('FlushServerCaps signature not found')
+          s=s.replace(old, old+'\n\t// Test-only: suppress the previously confirmed unrelated startup cache UAF.\n\treturn;',1)
+          server.write_text(s)
+          p=Path('Makefile')
+          m=p.read_text()
+          m=m.replace('OPTIONS_COMPILE_DEBUG=', 'OPTIONS_COMPILE_DEBUG=-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined ')
+          m=m.replace('OPTIONS_LINK_DEBUG=', 'OPTIONS_LINK_DEBUG=-g -fno-omit-frame-pointer -fsanitize=address,undefined ')
+          p.write_text(m)
+          PY
+          make -j2 DEBUG=YES CC=clang
+      - name: Build network probe
+        run: |
+          mkdir -p results
+          COMMON='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize=shift -D_DEBUG -DDEBUG -DUNIX -DUNIX_LINUX -DCPU_64 -D_REENTRANT -DREENTRANT -D_THREAD_SAFE -D_THREADSAFE -DTHREAD_SAFE -DTHREADSAFE -D_FILE_OFFSET_BITS=64 -Isoftether/src -Isoftether/src/Cedar -Isoftether/src/Mayaqua -fsigned-char -m64'
+          LIBS='-lm -ldl -lrt -lpthread -lssl -lcrypto -lreadline -lncurses -lz'
+          clang $COMMON softether_audit/udp_login_uaf_probe.c softether/tmp/as/vpnserver.a $LIBS -o results/udp_login_uaf_probe
+      - name: Start isolated server
+        run: |
+          chmod 700 softether/bin/vpnserver/vpnserver softether/bin/vpncmd/vpncmd
+          find softether/bin/vpnserver softether/bin/vpncmd -maxdepth 1 -type f ! -name vpnserver ! -name vpncmd -exec chmod 600 {} +
+          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:disable_coredump=0:symbolize=1:log_path=$PWD/results/asan"
+          export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:log_path=$PWD/results/ubsan"
+          cd softether/bin/vpnserver
+          ./vpnserver execsvc > "$GITHUB_WORKSPACE/results/server.stdout" 2> "$GITHUB_WORKSPACE/results/server.stderr" &
+          echo $! > "$GITHUB_WORKSPACE/results/server-supervisor.pid"
+          cd "$GITHUB_WORKSPACE"
+          for i in $(seq 1 60); do
+            if pgrep -x vpnserver >/dev/null && ss -lntp | grep -q ':443'; then break; fi
+            sleep 1
+          done
+          pgrep -a vpnserver | tee results/processes-before.txt
+          ss -lntup | tee results/listeners-before.txt
+          pgrep -x vpnserver >/dev/null
+      - name: Send unauthenticated protocol-UDP login
+        continue-on-error: true
+        run: |
+          export ASAN_OPTIONS="abort_on_error=1:detect_leaks=0:symbolize=1:log_path=$PWD/results/probe-asan"
+          export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:log_path=$PWD/results/probe-ubsan"
+          ./results/udp_login_uaf_probe 443 > results/probe.stdout 2> results/probe.stderr
+          echo $? > results/probe.exit
+          sleep 5
+      - name: Collect and classify diagnostics
+        if: always()
+        run: |
+          pgrep -a vpnserver > results/processes-after.txt || true
+          ss -lntup > results/listeners-after.txt || true
+          cp softether/bin/vpnserver/vpn_server.config results/vpn_server.config 2>/dev/null || true
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          r=Path('results')
+          reports=[]
+          for p in sorted(r.glob('asan*'))+sorted(r.glob('ubsan*')):
+              if not p.is_file() or p.stat().st_size == 0:
+                  continue
+              t=p.read_text(errors='replace')
+              reports.append({
+                  'file':str(p),
+                  'bytes':p.stat().st_size,
+                  'address_sanitizer':'ERROR: AddressSanitizer' in t,
+                  'undefined_behavior':'runtime error:' in t,
+                  'server_accept':'ServerAccept' in t,
+                  'cleanup_connection':'CleanupConnection' in t,
+                  'free_tcp':'Free' in t and 'Tcp' in t,
+                  'headline':next((x for x in t.splitlines() if 'ERROR: AddressSanitizer' in x or 'runtime error:' in x),'')
+              })
+          result={
+              'reports':reports,
+              'target_path_confirmed':any(x['server_accept'] and x['cleanup_connection'] for x in reports),
+              'server_alive_after':bool((r/'processes-after.txt').read_text(errors='replace').strip()) if (r/'processes-after.txt').exists() else False,
+              'probe_stdout':(r/'probe.stdout').read_text(errors='replace') if (r/'probe.stdout').exists() else '',
+              'probe_stderr':(r/'probe.stderr').read_text(errors='replace') if (r/'probe.stderr').exists() else '',
+          }
+          (r/'summary.json').write_text(json.dumps(result,indent=2))
+          print(json.dumps(result,indent=2))
+          PY
+          ./softether/bin/vpnserver/vpnserver stop > results/server-stop.stdout 2> results/server-stop.stderr || true
+          pkill -TERM -x vpnserver || true
+          sleep 2
+          pkill -KILL -x vpnserver || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: softether-udp-login-uaf
+          path: results/
+          retention-days: 14
