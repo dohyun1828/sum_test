@@ -12,11 +12,12 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-22.04
+    container: ubuntu:20.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y clang build-essential libssl-dev libreadline-dev libncurses5-dev zlib1g-dev openssl
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates clang build-essential libssl-dev libreadline-dev libncurses5-dev zlib1g-dev openssl python3
       - name: Fetch exact target source
         run: git clone --depth 1 --branch v4.34-9745-beta https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git softether
       - name: Build all source with libFuzzer coverage ASan and UBSan
@@ -28,12 +29,11 @@ jobs:
           from pathlib import Path
           p=Path('Makefile')
           s=p.read_text()
-          s=s.replace('CC=cc', 'CC=clang')
           s=s.replace('OPTIONS_COMPILE_DEBUG=', 'OPTIONS_COMPILE_DEBUG=-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined ')
           s=s.replace('OPTIONS_LINK_DEBUG=', 'OPTIONS_LINK_DEBUG=-g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined ')
           p.write_text(s)
           PY
-          make -j2 DEBUG=YES
+          make -j2 DEBUG=YES CC=clang
       - name: Build fuzz targets and valid corpus
         run: |
           mkdir -p results/bin results/crashes corpus/http_header corpus/x509
@@ -47,7 +47,7 @@ jobs:
           clang $GEN softether_audit/gen_pack_corpus.c softether/tmp/as/vpnserver.a $LIBS -o results/bin/gen_pack_corpus
           ./results/bin/gen_pack_corpus
           printf 'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n' > corpus/http_header/get
-          printf 'POST /vpnsvc/connect.cgi HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nAAAA' > corpus/http_header/post
+          printf 'POST /vpnsvc/vpn.cgi HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nAAAA' > corpus/http_header/post
           printf 'SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n' > corpus/http_header/sstp
           openssl req -x509 -newkey rsa:2048 -nodes -subj '/CN=fuzz' -keyout /tmp/key.pem -out corpus/x509/cert.pem -days 1
           openssl x509 -in corpus/x509/cert.pem -outform DER -out corpus/x509/cert.der
