@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 #include <sys/stat.h>
 #include <Mayaqua/Mayaqua.h>
 #include <Cedar/Cedar.h>
